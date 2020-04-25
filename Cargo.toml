@@ -1,0 +1,16 @@
+[package]
+name = "aemo_mdff"
+version = "0.1.0"
+edition = "2018"
+authors = ["Christopher Andronikos <naxos.holdings@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "AEMO compliant NEM12 and NEM13 parser"
+homepage = "https://github.com/naxos-io/aemo_mdff"
+repository = "https://github.com/naxos-io/aemo_mdff"
+readme = "README.md"
+keywords = ["nem12", "nem13", "nem", "aemo", "meter"]
+categories = ["parsing", "encoding"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
