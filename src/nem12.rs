@@ -1,119 +1,19 @@
 use nom::{
     IResult,
-    bytes::streaming::{take,tag},
+    bytes::streaming::{tag},
     character::streaming::{alphanumeric1,digit1,alpha1},
     character::complete::multispace0,
     number::streaming::double,
     sequence::{separated_pair,pair},
-    combinator::{verify,peek,recognize,opt},
+    combinator::{peek,recognize,opt},
     branch::permutation,
     multi::separated_list,
     error,
 };
 use chrono::{NaiveDateTime,NaiveDate};
-
 use std::str;
-use std::fmt;
 
-type Input<'a> = &'a [u8];
-
-fn section_of_max_length<'a, I: Clone, E: error::ParseError<I>, F: Copy>(
-    test: F,
-    length: usize
-) -> impl Fn(I) -> IResult<I, Input<'a>, E>
-where
-    F: Fn(I) -> IResult<I, Input<'a>, E>
-{
-    verify(test, move |s: Input| (s.len() <= length) && (s.len() > 0))
-}
-
-fn section_of_exact_length<'a, I: Clone, E: error::ParseError<I>, F: Copy>(
-    test: F,
-    length: usize
-) -> impl Fn(I) -> IResult<I, Input<'a>, E>
-where
-    F: Fn(I) -> IResult<I, Input<'a>, E>
-{
-    verify(test, move |s: Input| s.len() == length)
-}
-
-use nom::{InputTake,Compare,InputLength};
-
-fn optional_field<I1, T, O, E1, F>(
-    test: F,
-    end_marker: T
-) -> impl Fn(I1) -> IResult<I1, Option<O>, E1>
-where
-    I1: fmt::Debug + Clone + InputTake + Compare<T>,
-    //I2: Clone + InputTake + Compare<T>,
-    T: InputLength + Clone + Copy,
-    E1: fmt::Debug + error::ParseError<I1>,
-    //E2: error::ParseError<I2>,
-    O: fmt::Debug,
-    F: Fn(I1) -> IResult<I1, O, E1>
-{
-    move |input: I1| {
-        let i = input.clone();
-        match test(input) {
-            Ok(d) => Ok((d.0,Some(d.1))),
-            Err(nom::Err::Error(x)) => {
-                match peek(tag::<T,I1,E1>(end_marker))(i) {
-                    Ok((input,_)) => Ok((input,None)),
-                    Err(nom::Err::Error(e)) => {
-                        return Err(nom::Err::Error(e))
-                    }
-                    x => { println!("'{:?}'", x); panic!("This should never happen") }
-                }
-            },
-            x => { println!("{:?}", x); panic!("This should never happen") }
-        }
-    }
-}
-
-fn datetime_14(input: Input) -> IResult<Input,NaiveDateTime> {
-    let (input, date_time_str) = take(14usize)(input)?;
-
-    let date_time_str = match str::from_utf8(date_time_str) {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::TakeUntil)))
-    }?;
-    let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M%S") {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
-    }?;
-
-    Ok((input,date_time))
-}
-
-fn datetime_12(input: Input) -> IResult<Input,NaiveDateTime> {
-    let (input, date_time_str) = take(12usize)(input)?;
-
-    let date_time_str = match str::from_utf8(date_time_str) {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::TakeUntil)))
-    }?;
-    let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M") {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
-    }?;
-
-    Ok((input,date_time))
-}
-
-fn date_8(input: Input) -> IResult<Input,NaiveDate> {
-    let (input, date_time_str) = take(8usize)(input)?;
-
-    let date_time_str = match str::from_utf8(date_time_str) {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::TakeUntil)))
-    }?;
-    let date_time: NaiveDate = match NaiveDate::parse_from_str(date_time_str,"%Y%m%d") {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
-    }?;
-
-    Ok((input,date_time))
-}
+use crate::common::*;
 
 pub mod record {
     use super::*;
@@ -198,11 +98,11 @@ pub mod record {
         let (input, _) = tag(",")(input)?;
         let (input, uom) = section_of_max_length(alphanumeric1, 5)(input)?;
         let (input, _) = tag(",")(input)?;
-        let (input, interval_length) = section_of_exact_length(digit1, 2)(input)?; // TODO: Convert to unsigned int
+        let (input, interval_length) = section_of_exact_length(digit1, 2)(input)?;
         let (input, _) = tag(",")(input)?;
         let (input, next_scheduled_read_date) = match date_8(input) {
             Ok(d) => (d.0,Some(d.1)),
-            Err(nom::Err::Incomplete(x)) => {
+            Err(nom::Err::Incomplete(_)) => {
                 match peek(tag("\n"))(input) {
                     Ok((input,_)) => (input,None),
                     Err(nom::Err::Error((x,e))) => {

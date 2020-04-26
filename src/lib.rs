@@ -1,4 +1,5 @@
 pub mod nem12;
+mod common;
 
 #[cfg(test)]
 mod tests {
