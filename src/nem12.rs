@@ -2,9 +2,11 @@ use nom::{
     IResult,
     bytes::streaming::{take,tag},
     character::streaming::{alphanumeric1,digit1,alpha1},
+    character::complete::multispace0,
     number::streaming::double,
-    sequence::separated_pair,
-    combinator::{verify,peek},
+    sequence::{separated_pair,pair},
+    combinator::{verify,peek,recognize,opt},
+    branch::permutation,
     multi::separated_list,
     error,
 };
@@ -290,13 +292,96 @@ pub mod record {
     }
 
     // Interval event record (400)
-    // fn interval_event
+    #[derive(Clone,Debug,PartialEq)]
+    pub struct IntervalEvent<'a> {
+        pub start_interval: Input<'a>,
+        pub end_interval: Input<'a>,
+        pub quality_method: Input<'a>,
+        pub reason_code: Input<'a>,
+        pub reason_description: Option<Input<'a>>,
+    }
+
+    impl <'a>IntervalEvent<'a> {
+        pub fn parse(input: Input<'a>) -> IResult<Input<'a>,IntervalEvent> {
+            interval_event(input)
+        }
+    }
+
+    fn interval_event<'a>(input: Input<'a>) -> IResult<Input<'a>,IntervalEvent<'a>> {
+        let (input, _) = tag("400,")(input)?;
+        let (input, start_interval) = section_of_max_length(digit1,4)(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, end_interval) = section_of_max_length(digit1,4)(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, quality_method) = section_of_max_length(alphanumeric1,3)(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, reason_code) = section_of_max_length(digit1,3)(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, reason_description) = optional_field(section_of_max_length(alphanumeric1,24),"\n")(input)?;
+
+        let interval_event = IntervalEvent {
+            start_interval,
+            end_interval,
+            quality_method,
+            reason_code,
+            reason_description
+        };
+
+        Ok((input,interval_event))
+    }
 
     // B2B details record (500)
-    // fn b2b_details
+    #[derive(Clone,Debug,PartialEq)]
+    pub struct B2BDetails<'a> {
+        pub trans_code: Input<'a>,
+        pub ret_service_order: Input<'a>,
+        pub read_datetime: NaiveDateTime,
+        pub index_read: Input<'a>,
+    }
+
+    impl B2BDetails<'_> {
+        pub fn parse(input: Input) -> IResult<Input,B2BDetails> {
+            b2b_details(input)
+        }
+    }
+
+    fn b2b_details<'a>(input: Input<'a>) -> IResult<Input<'a>,B2BDetails<'a>> {
+        let (input, _) = tag("500,")(input)?;
+        let (input, trans_code) = section_of_exact_length(alpha1,1)(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, ret_service_order) = section_of_max_length(alphanumeric1,15)(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, read_datetime) = datetime_14(input)?;
+        let (input, _) = tag(",")(input)?;
+        let (input, index_read) = section_of_max_length(
+            move |i| recognize(permutation((digit1,opt(pair(tag("."),digit1)))))(i)
+        ,15)(input)?;
+
+        let b2b_details = B2BDetails {
+            trans_code,
+            ret_service_order,
+            read_datetime,
+            index_read
+        };
+
+        Ok((input,b2b_details))
+    }
 
     // End of data (900)
-    // fn end_of_data
+    #[derive(Clone,Debug,PartialEq)]
+    pub struct EndOfData {}
+
+    impl EndOfData {
+        pub fn parse(input: Input) -> IResult<Input,EndOfData> {
+            end_of_data(input)
+        }
+    }
+
+    fn end_of_data(input: Input) -> IResult<Input,EndOfData> {
+        let (input, _) = tag("900")(input)?;
+        let (input, _) = multispace0(input)?;
+        Ok((input,EndOfData {}))
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +390,7 @@ mod tests {
     use chrono::{NaiveDate};
 
     #[test]
-    fn header() {
+    fn header_100() {
         let date = NaiveDate::from_ymd(2004,5,1).and_hms(11, 35, 0);
         let header = record::Header::new (
             date.clone(),
@@ -350,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn nmi_data_details() {
+    fn nmi_data_details_200() {
         let nmi_data_details = record::NMIDataDetails {
             nmi: b"VABD000163",
             nmi_configuration: b"E1Q1",
@@ -383,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_data() {
+    fn interval_data_300() {
         let interval_data = record::IntervalData {
             interval_date: NaiveDate::from_ymd(2004, 2, 1),
             interval_value: vec![1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111],
@@ -402,5 +487,43 @@ mod tests {
         };
 
         assert_eq!(res,(b"\n" as &[u8],interval_data));
+    }
+
+    #[test]
+    fn interval_event_400() {
+        let interval_event = record::IntervalEvent {
+            start_interval: b"1",
+            end_interval: b"20",
+            quality_method: b"F14",
+            reason_code: b"76",
+            reason_description: None,
+        };
+
+        let raw = b"400,1,20,F14,76,\n";
+        let res = record::IntervalEvent::parse(raw).unwrap();
+        assert_eq!(res,(b"\n" as &[u8],interval_event));
+    }
+
+    #[test]
+    fn b2b_details_500() {
+        let interval_event = record::B2BDetails {
+            trans_code: b"S",
+            ret_service_order: b"RETNSRVCEORD1",
+            read_datetime: NaiveDate::from_ymd(2003,12,20).and_hms(15,45,0),
+            index_read: b"001123.5",
+        };
+
+        let raw = b"500,S,RETNSRVCEORD1,20031220154500,001123.5\n";
+        let res = record::B2BDetails::parse(raw);
+        assert_eq!(res,Ok((b"\n" as &[u8],interval_event)));
+    }
+
+    #[test]
+    fn end_of_data_900() {
+        let end_of_data = record::EndOfData {};
+
+        let raw = b"900\n";
+        let res = record::EndOfData::parse(raw);
+        assert_eq!(res,Ok((b"" as &[u8],end_of_data)));
     }
 }
