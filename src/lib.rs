@@ -1,3 +1,5 @@
+pub mod nem12;
+
 #[cfg(test)]
 mod tests {
     #[test]
