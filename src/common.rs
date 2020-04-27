@@ -1,6 +1,7 @@
 use nom::{
+    bytes::complete::{take,tag},
+    // end of streaming combinator imports
     IResult,
-    bytes::streaming::{take,tag},
     combinator::{verify,peek,},
     error,
     InputTake, Compare, InputLength
@@ -10,7 +11,7 @@ use chrono::{NaiveDateTime,NaiveDate};
 use std::fmt;
 use std::str;
 
-pub type Input<'a> = &'a [u8];
+pub type Input<'a> = &'a str;
 
 pub fn section_of_max_length<'a, I: Clone, E: error::ParseError<I>, F: Copy>(
     test: F,
@@ -38,10 +39,8 @@ pub fn optional_field<I1, T, O, E1, F>(
 ) -> impl Fn(I1) -> IResult<I1, Option<O>, E1>
 where
     I1: fmt::Debug + Clone + InputTake + Compare<T>,
-    //I2: Clone + InputTake + Compare<T>,
     T: InputLength + Clone + Copy,
     E1: fmt::Debug + error::ParseError<I1>,
-    //E2: error::ParseError<I2>,
     O: fmt::Debug,
     F: Fn(I1) -> IResult<I1, O, E1>
 {
@@ -66,10 +65,6 @@ where
 pub fn datetime_14(input: Input) -> IResult<Input,NaiveDateTime> {
     let (input, date_time_str) = take(14usize)(input)?;
 
-    let date_time_str = match str::from_utf8(date_time_str) {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::TakeUntil)))
-    }?;
     let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M%S") {
         Ok(r) => Ok(r),
         Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
@@ -81,10 +76,6 @@ pub fn datetime_14(input: Input) -> IResult<Input,NaiveDateTime> {
 pub fn datetime_12(input: Input) -> IResult<Input,NaiveDateTime> {
     let (input, date_time_str) = take(12usize)(input)?;
 
-    let date_time_str = match str::from_utf8(date_time_str) {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::TakeUntil)))
-    }?;
     let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M") {
         Ok(r) => Ok(r),
         Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
@@ -96,10 +87,6 @@ pub fn datetime_12(input: Input) -> IResult<Input,NaiveDateTime> {
 pub fn date_8(input: Input) -> IResult<Input,NaiveDate> {
     let (input, date_time_str) = take(8usize)(input)?;
 
-    let date_time_str = match str::from_utf8(date_time_str) {
-        Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::TakeUntil)))
-    }?;
     let date_time: NaiveDate = match NaiveDate::parse_from_str(date_time_str,"%Y%m%d") {
         Ok(r) => Ok(r),
         Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
@@ -107,3 +94,11 @@ pub fn date_8(input: Input) -> IResult<Input,NaiveDate> {
 
     Ok((input,date_time))
 }
+
+pub fn eof<I: InputLength + Copy, E: error::ParseError<I>>(input: I) -> IResult<I, I, E> {
+    if input.input_len() == 0 {
+      Ok((input, input))
+    } else {
+      Err(nom::Err::Error(E::from_error_kind(input, error::ErrorKind::Eof)))
+    }
+  }
