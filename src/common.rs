@@ -107,4 +107,4 @@ pub fn eof<I: InputLength + Copy, E: error::ParseError<I>>(input: I) -> IResult<
     } else {
       Err(nom::Err::Error(E::from_error_kind(input, error::ErrorKind::Eof)))
     }
-  }
+}
