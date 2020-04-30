@@ -4,22 +4,73 @@ use nom::{
     character::complete::{alphanumeric1,digit1,alpha1},
     number::complete::double,
     character::complete::multispace0,
-    sequence::pair,
-    combinator::{peek,recognize,opt,map},
+    sequence::{pair},
+    combinator::{peek,recognize,opt,map,all_consuming},
     branch::{alt,permutation},
-    multi::separated_list,
+    multi::{separated_list},
     error,
 };
 
 use chrono::{NaiveDateTime,NaiveDate};
-use ndarray::Array;
 use std::str;
 
 use crate::common::*;
 
+#[derive(Clone,Debug,PartialEq)]
 pub struct NEM12<'a> {
     header: record::Header<'a>,
     nmi_data_details: Vec<NMIDetails<'a>>
+}
+
+#[derive(Clone,Debug,PartialEq)]
+pub struct NMIDetails<'a> {
+    rec: record::NMIDataDetails<'a>,
+    data: Vec<Data<'a>>
+}
+
+#[derive(Clone,Debug,PartialEq)]
+pub struct Data<'a> {
+    rec: record::IntervalData<'a>,
+    events: Vec<record::IntervalEvent<'a>>,
+    b2b_details: Vec<record::B2BDetails<'a>>,
+}
+
+pub fn get_data_for_interval(input: Input) -> IResult<Input,Data> {
+    let (input,rec) = record::IntervalData::parse(input)?;
+    let (input_a,_) = rec_separator(input)?;
+    let (input_b,events): (Input,Vec<record::IntervalEvent>) = separated_list(rec_separator,record::IntervalEvent::parse)(input_a)?;
+    let input = if events.is_empty() { input } else { input_b };
+    let (input_a,_) = rec_separator(input)?;
+    let (input_b,b2b_details): (Input,Vec<record::B2BDetails>) = separated_list(rec_separator,record::B2BDetails::parse)(input_a)?;
+    let input = if b2b_details.is_empty() { input } else { input_b };
+
+    Ok((input, Data { rec, events, b2b_details }))
+}
+
+pub fn get_nmi_data_details(input: Input) -> IResult<Input,NMIDetails> {
+    let (input,rec) = record::NMIDataDetails::parse(input)?;
+    let (input,_) = rec_separator(input)?;
+    let (input,data): (Input,Vec<Data>) = separated_list(rec_separator,get_data_for_interval)(input)?;
+
+    Ok((input, NMIDetails { rec, data }))
+}
+
+impl <'a>NEM12<'a> {
+    fn from_str(input: Input<'a>) -> Result<NEM12<'a>,nom::Err<(&str,error::ErrorKind)>> {
+        let (input,header) = record::Header::parse(input)?;
+        let (input_a,_) = rec_separator(input)?;
+        let (input_b,nmi_data_details): (Input,Vec<NMIDetails>) = separated_list(rec_separator,get_nmi_data_details)(input_a)?;
+        let input = if nmi_data_details.is_empty() { input } else { input_b };
+
+        let (input,_) = rec_separator(input)?;
+        let (input,_) = record::EndOfData::parse(input)?;
+        let (_,_) = all_consuming(opt(rec_separator))(input)?;
+
+        Ok(NEM12 {
+            header,
+            nmi_data_details
+        })
+    }
 }
 
 struct Parser<'a> {
@@ -77,17 +128,6 @@ impl <'a>Parser<'a> {
     }
 }
 
-struct NMIDetails<'a> {
-    rec: record::NMIDataDetails<'a>,
-    data: Array<f64,DataDetails<'a>>
-}
-
-#[derive(Clone,Debug,PartialEq)]
-enum DataDetails<'a> {
-    Details(&'a record::NMIDataDetails<'a>),
-    Event(&'a record::IntervalEvent<'a>)
-}
-
 pub mod file {
     use super::*;
 
@@ -116,6 +156,36 @@ pub mod file {
         300,20031205,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,A,,,20031206011155,\n\
         900";
 
+        const DATADETAILS_ROWS_STR: &'static str = "200,NCDE001111,E1B1Q1E2,1,E1,N1,METSER123,Wh,15,\n\
+        300,20031204,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,A,,,20031206011132,20031207011022\n\
+        300,20031205,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,A,,,20031206011132,20031207011022\n\
+        ";
+
+        const NEM12_WITH_QUALITY: &'static str = "100,NEM12,200404201300,MDA1,Ret1\n\
+        200,CCCC123456,E1,001,E1,N1,METSER123,kWh,30,\n\
+        300,20040417,18.023,19.150,17.592,24.155,18.568,22.304,19.222,19.032,19.090,22.237,24.350,22.274,20.193,16.615,19.575,20.391,16.459,20.527,21.438,19.327,21.424,16.656,17.616,18.416,16.666,19.961,18.120,18.023,18.588,21.759,17.841,19.548,18.486,21.391,15.656,16.634,16.377,14.246,17.451,15.742,18.038,18.470,14.936,17.987,15.751,19.750,16.202,14.733,V,,,20040418203500,20040419003500\n\
+        400,1,20,F14,76,\n\
+        400,21,24,A,,\n\
+        400,25,48,S14,1,\n\
+        900\n\
+        ";
+
+        #[test]
+        fn get_nmi_data_details_parser() {
+            let (input,_) = get_nmi_data_details(DATADETAILS_ROWS_STR).unwrap();
+            assert_eq!(input,"\n")
+        }
+
+        #[test]
+        fn get_nmi_with_data_quality() {
+            let _nem12_obj = NEM12::from_str(NEM12_WITH_QUALITY).unwrap();
+        }
+
+        #[test]
+        fn multiple_meters_from_str() {
+            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR).unwrap();
+        }
+
         #[test]
         fn multiple_meters() {
 
@@ -128,6 +198,11 @@ pub mod file {
             assert_eq!(parser.parse_line(),Ok(Some(record::Kind::EndOfData(record::EndOfData{}))));
             assert_eq!(parser.parse_line(),Ok(None));
             assert_eq!(parser.parse_line(),Err(("Error: parser consumed all input",0,"lines")));
+        }
+
+        #[test]
+        fn nem12_from_str() {
+            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR).unwrap();
         }
     }
 }
@@ -271,7 +346,7 @@ pub mod record {
     }
 
     fn interval_data<'a>(input: Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
-            let (input, _) = tag("300,")(input)?;
+        let (input, _) = tag("300,")(input)?;
         let (input, interval_date) = date_8(input)?;
         let (input, _) = tag(",")(input)?;
         let (input, interval_value) = separated_list(tag(","),double)(input)?;
@@ -293,16 +368,7 @@ pub mod record {
         let (input, _) = tag(",")(input)?;
         let (input, update_datetime) = datetime_14(input)?;
         let (input, _) = tag(",")(input)?;
-        let (input, msats_load_datetime) = match datetime_14(input) {
-            Ok((input,d)) => (input,Some(d)),
-            Err(nom::Err::Error((input,error::ErrorKind::Eof))) => {
-                (input,None)
-            },
-            Err(nom::Err::Error((input,error::ErrorKind::ParseTo))) => {
-                return Err(nom::Err::Error((input,error::ErrorKind::ParseTo)))
-            },
-            x => { println!("{:?}", x); panic!("This should never happen") }
-        };
+        let (input, msats_load_datetime) = opt(datetime_14)(input)?;
 
         let interval_data = IntervalData {
             interval_date,
@@ -323,7 +389,7 @@ pub mod record {
         pub start_interval: Input<'a>,
         pub end_interval: Input<'a>,
         pub quality_method: Input<'a>,
-        pub reason_code: Input<'a>,
+        pub reason_code: Option<Input<'a>>,
         pub reason_description: Option<Input<'a>>,
     }
 
@@ -341,7 +407,7 @@ pub mod record {
         let (input, _) = tag(",")(input)?;
         let (input, quality_method) = section_of_max_length(alphanumeric1,3)(input)?;
         let (input, _) = tag(",")(input)?;
-        let (input, reason_code) = section_of_max_length(digit1,3)(input)?;
+        let (input, reason_code) = optional_field(section_of_max_length(digit1,3),",")(input)?;
         let (input, _) = tag(",")(input)?;
         let (input, reason_description) = optional_field(section_of_max_length(alphanumeric1,24),"\n")(input)?;
 
@@ -405,7 +471,7 @@ pub mod record {
 
     fn end_of_data(input: Input) -> IResult<Input,EndOfData> {
         let (input, _) = tag("900")(input)?;
-        let (input, _) = multispace0(input)?;
+        let (input, _) = multispace0(input)?; // TODO: Should this be removed?
         Ok((input,EndOfData {}))
     }
 
@@ -520,11 +586,35 @@ pub mod record {
                 start_interval: "1",
                 end_interval: "20",
                 quality_method: "F14",
-                reason_code: "76",
+                reason_code: Some("76"),
                 reason_description: None,
             };
     
             let raw = "400,1,20,F14,76,\n";
+            let res = record::IntervalEvent::parse(raw).unwrap();
+            assert_eq!(res,("\n",interval_event));
+
+            let interval_event = record::IntervalEvent {
+                start_interval: "25",
+                end_interval: "48",
+                quality_method: "S14",
+                reason_code: Some("1"),
+                reason_description: None,
+            };
+    
+            let raw = "400,25,48,S14,1,\n";
+            let res = record::IntervalEvent::parse(raw).unwrap();
+            assert_eq!(res,("\n",interval_event));
+
+            let interval_event = record::IntervalEvent {
+                start_interval: "21",
+                end_interval: "24",
+                quality_method: "A",
+                reason_code: None,
+                reason_description: None,
+            };
+    
+            let raw = "400,21,24,A,,\n";
             let res = record::IntervalEvent::parse(raw).unwrap();
             assert_eq!(res,("\n",interval_event));
         }

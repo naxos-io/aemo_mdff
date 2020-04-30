@@ -1,6 +1,8 @@
 use nom::{
     bytes::complete::{take,tag},
+    character::complete::newline,
     // end of streaming combinator imports
+    multi::many1_count,
     IResult,
     combinator::{verify,peek,},
     error,
@@ -12,6 +14,10 @@ use std::fmt;
 use std::str;
 
 pub type Input<'a> = &'a str;
+
+pub fn rec_separator(input: Input) -> IResult<Input,usize> {
+    many1_count(newline)(input)
+}
 
 pub fn section_of_max_length<'a, I: Clone, E: error::ParseError<I>, F: Copy>(
     test: F,
