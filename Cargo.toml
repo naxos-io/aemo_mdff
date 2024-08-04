@@ -1,7 +1,7 @@
 [package]
 name = "aemo_mdff"
 version = "0.2.0"
-edition = "2018"
+edition = "2021"
 authors = ["Christopher Andronikos <naxos.holdings@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "AEMO compliant NEM12 and NEM13 parser"
