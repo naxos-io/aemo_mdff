@@ -1,11 +1,10 @@
 use nom::{
-    branch::{alt,permutation}, bytes::complete::tag, character::complete::{alpha1, alphanumeric1, digit1, multispace0}, combinator::{all_consuming, map, opt, peek, recognize}, error::{self, Error, ErrorKind}, multi::{many_till, separated_list0, separated_list1 as separated_list}, number::complete::double, sequence::{pair, preceded, terminated}, Err, IResult, InputIter, InputTake, Needed
+    branch::{alt,permutation}, bytes::complete::tag, character::complete::{alpha1, alphanumeric1, digit1, multispace0}, combinator::{map, opt, peek, recognize}, error::Error, multi::separated_list1 as separated_list, number::complete::double, sequence::{pair, preceded, terminated}, Err, IResult, InputTake, Needed
 };
 
 use chrono::{NaiveDateTime,NaiveDate};
-use record::{B2BDetails, Header, IntervalData, IntervalEvent, Kind, NMIDataDetails};
-use std::{borrow::BorrowMut, path::Iter, str, sync::Mutex};
-use std::collections::VecDeque;
+use record::{B2BDetails, EndOfData, Header, IntervalData, IntervalEvent, NMIDataDetails};
+use std::{str, sync::Mutex};
 
 use crate::common::*;
 
@@ -34,23 +33,35 @@ fn parse_nmi_data_details<'a>(input:Input<'a>) -> IResult<Input,NMIDataDetails> 
 
 fn parse_interval_data<'a>(capacity: usize) -> impl FnMut(Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
     move |input: Input<'a>| {
-        let (input, mut interval_data) = IntervalData::parse(capacity,input)?;
-        let (input, _) = rec_separator(input)?;
+        let (input_before_events, mut interval_data) = IntervalData::parse(capacity,input)?;
+        let (input, _) = rec_separator(input_before_events)?;
         let (input, interval_events) = opt(separated_list(rec_separator, IntervalEvent::parse))(input)?;
         interval_data.interval_events = interval_events;
 
-        Ok((input,interval_data))
+        if interval_data.interval_events.is_some() {
+            Ok((input,interval_data))
+        } else {
+            Ok((input_before_events,interval_data))
+        }
     }
 }
 
 impl <'a>NEM12<'a> {
-    fn from_str(input: Input<'a>) -> Result<NEM12<'a>,usize> {
+    fn new(header: Header<'a>, nmi_data_details: Vec<NMIDataDetails<'a>>) -> Self {
+        NEM12 {
+            header,
+            nmi_data_details
+        }
+    }
+
+    fn from_str(input: Input<'a>) -> Result<NEM12<'a>,Err<Error<Input<'a>>>> {
         let strict = true;
-        let mut header: Option<Header> = None;
+        let (input,header) = Header::parse(input)?;
+        let (input,_) = rec_separator(input)?;
+        let (input,nmi_data_details) = separated_list(rec_separator, parse_nmi_data_details)(input)?;
+        let (input,_) = rec_separator(input)?;
+        let (_input,_) = EndOfData::parse(input)?;
 
-        let (input,nmi_data_details) = separated_list(rec_separator, parse_nmi_data_details)(input).map_err(|e| 0usize)?;
-
-        let header = header.ok_or(1usize)?;
         Ok(NEM12 {
             header,
             nmi_data_details
@@ -97,7 +108,7 @@ impl <'a>Parser<'a> {
                 map(record::IntervalEvent::parse, |o| Some(record::Kind::IntervalEvent(o))),
                 map(record::B2BDetails::parse, |o| Some(record::Kind::B2BDetails(o))),
                 map(record::EndOfData::parse, |o| Some(record::Kind::EndOfData(o))),
-            ))(line)
+            ))(line.into())
                 .map_err(|err| {
                     match err {
                         Err::Error(sentinel) => ("Error parsing line: ",line_no+1,Err::Error(sentinel)),
@@ -131,9 +142,8 @@ pub mod file {
 
     #[cfg(test)]
     mod tests {
-        use nom::sequence::terminated;
-
         use super::*;
+        use pretty_assertions::{assert_eq};
 
         const MULTIPLE_METERS_STR: &'static str = "100,NEM12,200402070911,MDA1,Ret1\n\
         200,NCDE001111,E1B1Q1E2,1,E1,N1,METSER123,Wh,15,\n\
@@ -172,28 +182,67 @@ pub mod file {
 
         #[test]
         fn get_nmi_data_details_parser() {
-            let (input,nmi_data_details) = record::NMIDataDetails::parse(DATADETAILS_ROWS_STR).unwrap();
+            let (input,nmi_data_details) = record::NMIDataDetails::parse(DATADETAILS_ROWS_STR.into()).unwrap();
             
             let capacity = 1440 / nmi_data_details.interval_length;
             let (input,_) = preceded(rec_separator,|i|{record::IntervalData::parse(capacity, i)})(input).unwrap();
             let (input,_) = preceded(rec_separator,|i|{record::IntervalData::parse(capacity, i)})(input).unwrap();
-            assert_eq!(input,"\n")
+            assert_eq!(input.into_fragment(),"\n");
+
+            let (input, nmi_data_details) = parse_nmi_data_details(DATADETAILS_ROWS_STR.into()).unwrap();
+            // TODO: Write test to compare output
         }
 
         #[test]
         fn get_nmi_with_data_quality() {
-            let _nem12_obj = NEM12::from_str(NEM12_WITH_QUALITY).unwrap();
+            let nmi_data_details = record::NMIDataDetails {
+                nmi: "CCCC123456".into(),
+                nmi_configuration: "E1".into(),
+                register_id: "001".into(),
+                nmi_suffix: "E1".into(),
+                mdm_data_stream_id: Some("N1".into()),
+                meter_serial_number: "METSER123".into(),
+                uom: "KWH".into(),
+                interval_length: 30usize,
+                next_scheduled_read_date: None,
+                interval_data_vec: Some(vec![IntervalData {
+                    interval_date: NaiveDate::from_ymd(2004,04,17),
+                    interval_value: vec![18.023, 19.15, 17.592, 24.155, 18.568, 22.304, 19.222, 19.032, 19.09, 22.237, 24.35, 22.274, 20.193, 16.615, 19.575, 20.391, 16.459, 20.527, 21.438, 19.327, 21.424, 16.656, 17.616, 18.416, 16.666, 19.961, 18.12, 18.023, 18.588, 21.759, 17.841, 19.548, 18.486, 21.391, 15.656, 16.634, 16.377, 14.246, 17.451, 15.742, 18.038, 18.47, 14.936, 17.987, 15.751, 19.75, 16.202, 14.733],
+                    quality_method: "V".into(),
+                    reason_code: None,
+                    reason_description: None,
+                    update_datetime: NaiveDateTime::parse_from_str("2004-04-18T20:35:00","%Y-%m-%dT%H:%M:%S").unwrap(),
+                    msats_load_datetime: Some(NaiveDateTime::parse_from_str("2004-04-19T00:35:00","%Y-%m-%dT%H:%M:%S").unwrap()),
+                    interval_events: Some(vec![
+                        IntervalEvent::parse("400,1,20,F14,76,\n".into()).map(|(_,o)|o).unwrap(),
+                        IntervalEvent::parse("400,21,24,A,,\n".into()).map(|(_,o)|o).unwrap(),
+                        IntervalEvent::parse("400,25,48,S14,1,\n".into()).map(|(_,o)|o).unwrap(),
+                    ])
+                }]),
+                b2b_details: None,
+            };
+            let nem12_test = NEM12 {
+                header: record::Header::new(
+                    "NEM12".into(),
+                    NaiveDate::from_ymd(2004,04,20).and_hms(13,0,0),
+                    "MDA1".into(),
+                    "Ret1".into()
+                ),
+                nmi_data_details: vec![nmi_data_details],
+            };
+            let nem12_obj = NEM12::from_str(NEM12_WITH_QUALITY.into());
+            assert_eq!(Ok(nem12_test),nem12_obj)
         }
 
         #[test]
         fn multiple_meters_from_str() {
-            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR).unwrap();
+            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR.into()).unwrap();
         }
 
         #[test]
         fn multiple_meters() {
 
-            let mut parser = Parser::new(MULTIPLE_METERS_STR);
+            let mut parser = Parser::new(MULTIPLE_METERS_STR.into());
 
             for _ in 1..20 {
                 parser.parse_line().unwrap();
@@ -206,18 +255,16 @@ pub mod file {
 
         #[test]
         fn nem12_from_str() {
-            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR);
+            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR.into());
             if let Err(e) = _nem12_obj {
                 println!("{:?}",e);
             }
-            _nem12_obj.unwrap();
+            // _nem12_obj.unwrap();
         }
     }
 }
 
 pub mod record {
-    use std::option;
-
     use nom::multi::many_m_n;
 
     use super::*;
@@ -233,13 +280,24 @@ pub mod record {
     }
 
     // Header record (100)
-    #[derive(Clone,Debug,PartialEq)]
+    #[derive(Clone,Debug)]
     pub struct Header<'a> {
         format: Input<'a>,
         created: NaiveDateTime,
         from_participant: Input<'a>,
         to_participant: Input<'a>,
     }
+
+    impl <'a>PartialEq for Header<'a> {
+        fn eq(&self, other: &Self) -> bool {
+            self.format.into_fragment() == other.format.into_fragment() &&
+            self.created == other.created &&
+            self.from_participant.into_fragment() == other.from_participant.into_fragment() &&
+            self.to_participant.into_fragment() == other.to_participant.into_fragment()
+        }
+    }
+
+    impl <'a>Eq for Header<'a> { }
 
     impl <'a>Header<'a> {
         pub fn new(format:Input<'a>, created: NaiveDateTime, from_participant: Input<'a>, to_participant: Input<'a>) -> Self {
@@ -273,7 +331,7 @@ pub mod record {
     }
 
     // NMI data details record (200)
-    #[derive(Clone,Debug,PartialEq)]
+    #[derive(Clone,Debug)]
     pub struct NMIDataDetails<'a> {
         pub nmi: Input<'a>,
         pub nmi_configuration: Input<'a>,
@@ -287,6 +345,24 @@ pub mod record {
         pub interval_data_vec: Option<Vec<IntervalData<'a>>>,
         pub b2b_details: Option<Vec<B2BDetails<'a>>>,
     }
+
+    impl <'a>PartialEq for NMIDataDetails<'a> {
+        fn eq(&self, other: &Self) -> bool {
+            self.nmi.into_fragment() == other.nmi.into_fragment() &&
+            self.nmi_configuration.into_fragment() == other.nmi_configuration.into_fragment() &&
+            self.register_id.into_fragment() == other.register_id.into_fragment() &&
+            self.nmi_suffix.into_fragment() == other.nmi_suffix.into_fragment() &&
+            self.mdm_data_stream_id.map(|o| o.into_fragment()) == other.mdm_data_stream_id.map(|o| o.into_fragment()) &&
+            self.meter_serial_number.into_fragment() == other.meter_serial_number.into_fragment() &&
+            self.uom.into_fragment().to_owned().to_lowercase() == other.uom.into_fragment().to_owned().to_lowercase() &&
+            self.interval_length == other.interval_length &&
+            self.next_scheduled_read_date == other.next_scheduled_read_date &&
+            self.interval_data_vec == other.interval_data_vec &&
+            self.b2b_details == other.b2b_details
+        }
+    }
+
+    impl <'a>Eq for NMIDataDetails<'a> { }
 
     impl <'a>NMIDataDetails<'a> {
         pub fn parse(input: Input) -> IResult<Input,NMIDataDetails> {
@@ -346,7 +422,7 @@ pub mod record {
     }
 
     // Interval data record (300)
-    #[derive(Clone,Debug,PartialEq)]
+    #[derive(Clone,Debug)]
     pub struct IntervalData<'a> {
         pub interval_date: NaiveDate,
         pub interval_value: Vec<f64>,
@@ -357,6 +433,21 @@ pub mod record {
         pub msats_load_datetime: Option<NaiveDateTime>,
         pub interval_events: Option<Vec<IntervalEvent<'a>>>
     }
+
+    impl <'a>PartialEq for IntervalData<'a> {
+        fn eq(&self, other: &Self) -> bool {
+            self.interval_date == other.interval_date &&
+            self.interval_value == other.interval_value &&
+            self.quality_method.into_fragment() == other.quality_method.into_fragment() &&
+            self.reason_code.map(|o| o.into_fragment()) == other.reason_code.map(|o| o.into_fragment()) &&
+            self.reason_description.map(|o| o.into_fragment()) == other.reason_description.map(|o| o.into_fragment()) &&
+            self.update_datetime == other.update_datetime &&
+            self.msats_load_datetime == other.msats_load_datetime &&
+            self.interval_events == other.interval_events
+        }
+    }
+
+    impl <'a>Eq for IntervalData<'a> { }
 
     impl <'a>IntervalData<'a> {
         pub fn parse(capacity: usize, input: Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
@@ -407,7 +498,7 @@ pub mod record {
     }
 
     // Interval event record (400)
-    #[derive(Clone,Debug,PartialEq)]
+    #[derive(Clone,Debug)]
     pub struct IntervalEvent<'a> {
         pub start_interval: Input<'a>,
         pub end_interval: Input<'a>,
@@ -415,6 +506,18 @@ pub mod record {
         pub reason_code: Option<Input<'a>>,
         pub reason_description: Option<Input<'a>>,
     }
+
+    impl <'a>PartialEq for IntervalEvent<'a> {
+        fn eq(&self, other: &Self) -> bool {
+            self.start_interval.into_fragment() == other.start_interval.into_fragment() &&
+            self.end_interval.into_fragment() == other.end_interval.into_fragment() &&
+            self.quality_method.into_fragment() == other.quality_method.into_fragment() &&
+            self.reason_code.map(|o| o.into_fragment()) == other.reason_code.map(|o| o.into_fragment()) &&
+            self.reason_description.map(|o| o.into_fragment()) == other.reason_description.map(|o| o.into_fragment())
+        }
+    }
+
+    impl <'a>Eq for IntervalEvent<'a> { }
 
     impl <'a>IntervalEvent<'a> {
         pub fn parse(input: Input<'a>) -> IResult<Input<'a>,IntervalEvent> {
@@ -446,13 +549,24 @@ pub mod record {
     }
 
     // B2B details record (500)
-    #[derive(Clone,Debug,PartialEq)]
+    #[derive(Clone,Debug)]
     pub struct B2BDetails<'a> {
         pub trans_code: Input<'a>,
         pub ret_service_order: Input<'a>,
         pub read_datetime: NaiveDateTime,
         pub index_read: Input<'a>,
     }
+
+    impl <'a>PartialEq for B2BDetails<'a> {
+        fn eq(&self, other: &Self) -> bool {
+            self.trans_code.into_fragment() == other.trans_code.into_fragment() &&
+            self.ret_service_order.into_fragment() == other.ret_service_order.into_fragment() &&
+            self.read_datetime == other.read_datetime &&
+            self.index_read.into_fragment() == other.index_read.into_fragment()
+        }
+    }
+
+    impl <'a>Eq for B2BDetails<'a> { }
 
     impl B2BDetails<'_> {
         pub fn parse(input: Input) -> IResult<Input,B2BDetails> {
@@ -500,66 +614,71 @@ pub mod record {
 
     #[cfg(test)]
     mod tests {
-        use super::{record,Input,error};
+        use std::borrow::Borrow;
+
+        use super::{record,Input};
+        use nom::error;
         use chrono::{NaiveDate};
     
         #[test]
         fn header_100() {
             let date = NaiveDate::from_ymd(2004,5,1).and_hms(11, 35, 0);
             let header = record::Header::new (
-                "NEM12",
+                "NEM12".into(),
                 date.clone(),
-                "MDA1",
-                "Ret1"
+                "MDA1".into(),
+                "Ret1".into()
             );
     
             let raw = "100,NEM12,200405011135,MDA1,Ret1\n";
     
-            let res: (Input, record::Header) = match record::Header::parse(raw) {
-                Ok(o) => o,
-                Err(e) => { println!("{:?}",e); panic!("Failed") }
-            };
+            let res = record::Header::parse(raw.into());
     
-            assert_eq!(res,("\n",header));
+            assert_eq!(res.map(|(r,v)| (r.into_fragment(),v)),
+                Ok(("\n",header))
+            );
     
             let header = record::Header::new (
-                "NEM12",
-                date.clone(),
-                "0123456789",
-                "Ret1"
+                "NEM12".into(),
+                date.clone().into(),
+                "0123456789".into(),
+                "Ret1".into()
             );
     
             let raw = "100,NEM12,200405011135,0123456789,Ret1\n";
     
-            let res: (Input, record::Header) = match record::Header::parse(raw) {
+            let res = record::Header::parse(raw.into()); /* {
                 Ok(o) => o,
                 Err(e) => { println!("{:?}",e); panic!("Failed") }
-            };
+            }; */
     
-            assert_eq!(res,("\n",header));
+            assert_eq!(res.map(|(r,v)| (r.into_fragment(),v)),
+                Ok(("\n",header))
+            );
     
             let raw = "100,NEM12,200405011135,12345678910,Ret1\n";
     
-            let res: (Input, error::ErrorKind) = match record::Header::parse(raw) {
+            let res = match record::Header::parse(raw.into())
+            .map(|(r,v)| (r.into_fragment(),v)) {
                 Ok(o) => { println!("{:?}",o); panic!("Failed") },
-                Err(nom::Err::Error(e)) => { (e.input,error::ErrorKind::Verify) }, //NOTE: must accomodate custom errors somehow
+                Err(nom::Err::Error(e)) => { (e.input.into_fragment(),error::ErrorKind::Verify) }, //NOTE: must accomodate custom errors somehow
                 Err(nom::Err::Incomplete(_)) |
                 Err(nom::Err::Failure(_)) => panic!("This should never happen")
             };
     
-            assert_eq!(res,("12345678910,Ret1\n",error::ErrorKind::Verify));
+            assert_eq!(res, ("12345678910,Ret1\n",error::ErrorKind::Verify));
         }
     
         #[test]
         fn nmi_data_details_200() {
             let nmi_data_details = record::NMIDataDetails {
-                nmi: "VABD000163",
-                nmi_configuration: "E1Q1",
-                register_id: "1",
-                nmi_suffix: "E1",
-                mdm_data_stream_id: Some("N1"),
-                meter_serial_number: "METSER123",
-                uom: "KWH",
+                nmi: "VABD000163".into(),
+                nmi_configuration: "E1Q1".into(),
+                register_id: "1".into(),
+                nmi_suffix: "E1".into(),
+                mdm_data_stream_id: Some("N1".into()),
+                meter_serial_number: "METSER123".into(),
+                uom: "KWH".into(),
                 interval_length: 30usize,
                 next_scheduled_read_date: None,
                 interval_data_vec: None,
@@ -568,21 +687,21 @@ pub mod record {
     
             let raw = "200,VABD000163,E1Q1,1,E1,N1,METSER123,KWH,30,\n";
     
-            let res = match record::NMIDataDetails::parse(raw) {
-                Ok(o) => o,
-                Err(e) => { println!("{:?}",e); panic!("Failed") }
-            };
+            let res = record::NMIDataDetails::parse(raw.into());
     
-            assert_eq!(res,("\n",nmi_data_details));
+            assert_eq!(res.map(|(i,v)|(i.into_fragment(),v)),Ok(("\n",nmi_data_details)));
     
             let raw = "200,VABD000163,E1Q1,1,E1,N1,METSER123,kWh,30,1234\n";
     
-            let res = match record::NMIDataDetails::parse(raw) {
-                Ok(o) => { println!("{:?}",o); panic!("Failed") },
-                Err(e) => e
-            };
+            let res = record::NMIDataDetails::parse(raw.into());
     
-            assert_eq!(res,nom::Err::Error(error::make_error("1234\n",error::ErrorKind::Tag)));
+            assert_eq!(res.map(|(i,v)|(i.into_fragment(),v)).map_err(|e| {
+                match e {
+                    nom::Err::Incomplete(e)=> nom::Err::Incomplete(e),
+                    nom::Err::Error(e) => nom::Err::Error(e.input.into_fragment()),
+                    nom::Err::Failure(e) => nom::Err::Failure(e.input.into_fragment()),
+                }
+            }),Err(nom::Err::Error("1234\n")));
         }
     
         #[test]
@@ -590,7 +709,7 @@ pub mod record {
             let interval_data = record::IntervalData {
                 interval_date: NaiveDate::from_ymd(2004, 2, 1),
                 interval_value: vec![1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111],
-                quality_method: "A",
+                quality_method: "A".into(),
                 reason_code: None,
                 reason_description: None,
                 update_datetime: NaiveDate::from_ymd(2004, 2, 2).and_hms(12, 0, 25),
@@ -600,65 +719,62 @@ pub mod record {
     
             let raw = "300,20040201,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,A,,,20040202120025,20040202142516";
     
-            let res = match record::IntervalData::parse(48, raw) {
-                Ok(o) => o,
-                Err(e) => { println!("{:?}",e); panic!("Failed") }
-            };
+            let res = record::IntervalData::parse(48, raw.into());
     
-            assert_eq!(res,("",interval_data));
+            assert_eq!(res.map(|(i,v)|(i.into_fragment(),v)),Ok(("",interval_data)));
         }
     
         #[test]
         fn interval_event_400() {
             let interval_event = record::IntervalEvent {
-                start_interval: "1",
-                end_interval: "20",
-                quality_method: "F14",
-                reason_code: Some("76"),
+                start_interval: "1".into(),
+                end_interval: "20".into(),
+                quality_method: "F14".into(),
+                reason_code: Some("76".into()),
                 reason_description: None,
             };
     
             let raw = "400,1,20,F14,76,\n";
-            let res = record::IntervalEvent::parse(raw).unwrap();
-            assert_eq!(res,("\n",interval_event));
+            let res = record::IntervalEvent::parse(raw.into());
+            assert_eq!(res.map(|(i,v)|(i.into_fragment(),v)),Ok(("\n",interval_event)));
 
             let interval_event = record::IntervalEvent {
-                start_interval: "25",
-                end_interval: "48",
-                quality_method: "S14",
-                reason_code: Some("1"),
+                start_interval: "25".into(),
+                end_interval: "48".into(),
+                quality_method: "S14".into(),
+                reason_code: Some("1".into()),
                 reason_description: None,
             };
     
             let raw = "400,25,48,S14,1,\n";
-            let res = record::IntervalEvent::parse(raw).unwrap();
-            assert_eq!(res,("\n",interval_event));
+            let res = record::IntervalEvent::parse(raw.into());
+            assert_eq!(res.map(|(i,v)|(i.into_fragment(),v)),Ok(("\n",interval_event)));
 
             let interval_event = record::IntervalEvent {
-                start_interval: "21",
-                end_interval: "24",
-                quality_method: "A",
+                start_interval: "21".into(),
+                end_interval: "24".into(),
+                quality_method: "A".into(),
                 reason_code: None,
                 reason_description: None,
             };
     
             let raw = "400,21,24,A,,\n";
-            let res = record::IntervalEvent::parse(raw).unwrap();
-            assert_eq!(res,("\n",interval_event));
+            let res = record::IntervalEvent::parse(raw.into());
+            assert_eq!(res.map(|(r,v)| (r.into_fragment(),v)),Ok(("\n",interval_event)));
         }
     
         #[test]
         fn b2b_details_500() {
             let interval_event = record::B2BDetails {
-                trans_code: "S",
-                ret_service_order: "RETNSRVCEORD1",
+                trans_code: "S".into(),
+                ret_service_order: "RETNSRVCEORD1".into(),
                 read_datetime: NaiveDate::from_ymd(2003,12,20).and_hms(15,45,0),
-                index_read: "001123.5",
+                index_read: "001123.5".into(),
             };
     
             let raw = "500,S,RETNSRVCEORD1,20031220154500,001123.5\n";
-            let res = record::B2BDetails::parse(raw);
-            assert_eq!(res,Ok(("\n",interval_event)));
+            let res = record::B2BDetails::parse(raw.into());
+            assert_eq!(res.map(|(r,v)| (r.into_fragment(),v)),Ok(("\n",interval_event)));
         }
     
         #[test]
@@ -666,8 +782,8 @@ pub mod record {
             let end_of_data = record::EndOfData {};
     
             let raw = "900\n";
-            let res = record::EndOfData::parse(raw);
-            assert_eq!(res,Ok(("",end_of_data)));
+            let res = record::EndOfData::parse(raw.into());
+            assert_eq!(res.map(|(r,v)| (r.into_fragment(),v)),Ok(("",end_of_data)));
         }
     }
 }

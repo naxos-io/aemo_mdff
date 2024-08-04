@@ -12,8 +12,9 @@ use chrono::{NaiveDateTime,NaiveDate};
 
 use std::fmt;
 use std::str;
+use nom_locate::LocatedSpan;
 
-pub type Input<'a> = &'a str;
+pub type Input<'a> = LocatedSpan<&'a str>;
 
 pub fn rec_separator(input: Input) -> IResult<Input,usize> {
     many1_count(newline)(input)
@@ -26,7 +27,7 @@ pub fn section_of_max_length<'a, E: error::ParseError<Input<'a>>, F: Copy>(
 where
     F: Fn(Input<'a>) -> IResult<Input<'a>, Input<'a>, E>
 {
-    verify(test, move |s: Input| (s.len() <= length) && (s.len() > 0))
+    verify(test, move |s: &Input| (s.len() <= length) && (s.len() > 0))
 }
 
 pub fn section_of_exact_length<'a, E: error::ParseError<Input<'a>>, F: Copy>(
@@ -36,7 +37,7 @@ pub fn section_of_exact_length<'a, E: error::ParseError<Input<'a>>, F: Copy>(
 where
     F: Fn(Input<'a>) -> IResult<Input<'a>, Input<'a>, E>
 {
-    verify(test, move |s: Input| s.len() == length)
+    verify(test, move |s: &Input| s.len() == length)
 }
 
 pub fn optional_field<I1, T, O, E1, F>(
@@ -71,7 +72,7 @@ where
 pub fn datetime_14(input: Input) -> IResult<Input,NaiveDateTime> {
     let (input, date_time_str) = take(14usize)(input)?;
 
-    let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M%S") {
+    let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str.fragment(),"%Y%m%d%H%M%S") {
         Ok(r) => Ok(r),
         Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::Fail)))
     }?;
@@ -82,7 +83,7 @@ pub fn datetime_14(input: Input) -> IResult<Input,NaiveDateTime> {
 pub fn datetime_12(input: Input) -> IResult<Input,NaiveDateTime> {
     let (input, date_time_str) = take(12usize)(input)?;
 
-    let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M") {
+    let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str.fragment(),"%Y%m%d%H%M") {
         Ok(r) => Ok(r),
         Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::Fail)))
     }?;
@@ -93,7 +94,7 @@ pub fn datetime_12(input: Input) -> IResult<Input,NaiveDateTime> {
 pub fn date_8(input: Input) -> IResult<Input,NaiveDate> {
     let (input, date_time_str) = take(8usize)(input)?;
 
-    let date_time: NaiveDate = match NaiveDate::parse_from_str(date_time_str,"%Y%m%d") {
+    let date_time: NaiveDate = match NaiveDate::parse_from_str(date_time_str.fragment(),"%Y%m%d") {
         Ok(r) => Ok(r),
         Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::Fail)))
     }?;
