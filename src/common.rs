@@ -19,36 +19,36 @@ pub fn rec_separator(input: Input) -> IResult<Input,usize> {
     many1_count(newline)(input)
 }
 
-pub fn section_of_max_length<'a, I: Clone, E: error::ParseError<I>, F: Copy>(
+pub fn section_of_max_length<'a, E: error::ParseError<Input<'a>>, F: Copy>(
     test: F,
     length: usize
-) -> impl Fn(I) -> IResult<I, Input<'a>, E>
+) -> impl FnMut(Input<'a>) -> IResult<Input<'a>, Input<'a>, E>
 where
-    F: Fn(I) -> IResult<I, Input<'a>, E>
+    F: Fn(Input<'a>) -> IResult<Input<'a>, Input<'a>, E>
 {
     verify(test, move |s: Input| (s.len() <= length) && (s.len() > 0))
 }
 
-pub fn section_of_exact_length<'a, I: Clone, E: error::ParseError<I>, F: Copy>(
+pub fn section_of_exact_length<'a, E: error::ParseError<Input<'a>>, F: Copy>(
     test: F,
     length: usize
-) -> impl Fn(I) -> IResult<I, Input<'a>, E>
+) -> impl FnMut(Input<'a>) -> IResult<Input<'a>, Input<'a>, E>
 where
-    F: Fn(I) -> IResult<I, Input<'a>, E>
+    F: Fn(Input<'a>) -> IResult<Input<'a>, Input<'a>, E>
 {
     verify(test, move |s: Input| s.len() == length)
 }
 
 pub fn optional_field<I1, T, O, E1, F>(
-    test: F,
+    mut test: F,
     end_marker: T
-) -> impl Fn(I1) -> IResult<I1, Option<O>, E1>
+) -> impl FnMut(I1) -> IResult<I1, Option<O>, E1>
 where
     I1: fmt::Debug + Clone + InputTake + Compare<T>,
     T: InputLength + Clone + Copy,
     E1: fmt::Debug + error::ParseError<I1>,
     O: fmt::Debug,
-    F: Fn(I1) -> IResult<I1, O, E1>
+    F: FnMut(I1) -> IResult<I1, O, E1>
 {
     move |input: I1| {
         let i = input.clone();
@@ -73,7 +73,7 @@ pub fn datetime_14(input: Input) -> IResult<Input,NaiveDateTime> {
 
     let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M%S") {
         Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
+        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::Fail)))
     }?;
 
     Ok((input,date_time))
@@ -84,7 +84,7 @@ pub fn datetime_12(input: Input) -> IResult<Input,NaiveDateTime> {
 
     let date_time: NaiveDateTime = match NaiveDateTime::parse_from_str(date_time_str,"%Y%m%d%H%M") {
         Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
+        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::Fail)))
     }?;
 
     Ok((input,date_time))
@@ -95,7 +95,7 @@ pub fn date_8(input: Input) -> IResult<Input,NaiveDate> {
 
     let date_time: NaiveDate = match NaiveDate::parse_from_str(date_time_str,"%Y%m%d") {
         Ok(r) => Ok(r),
-        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::ParseTo)))
+        Err(_) => Err(nom::Err::Error(error::make_error(input,error::ErrorKind::Fail)))
     }?;
 
     Ok((input,date_time))

@@ -1,71 +1,56 @@
 use nom::{
-    IResult,
-    bytes::complete::{tag},
-    character::complete::{alphanumeric1,digit1,alpha1},
-    number::complete::double,
-    character::complete::multispace0,
-    sequence::{pair},
-    combinator::{peek,recognize,opt,map,all_consuming},
-    branch::{alt,permutation},
-    multi::{separated_list},
-    error,
+    branch::{alt,permutation}, bytes::complete::tag, character::complete::{alpha1, alphanumeric1, digit1, multispace0}, combinator::{all_consuming, map, opt, peek, recognize}, error::{self, Error, ErrorKind}, multi::{many_till, separated_list0, separated_list1 as separated_list}, number::complete::double, sequence::{pair, preceded, terminated}, Err, IResult, InputIter, InputTake, Needed
 };
 
 use chrono::{NaiveDateTime,NaiveDate};
-use std::str;
+use record::{B2BDetails, Header, IntervalData, IntervalEvent, Kind, NMIDataDetails};
+use std::{borrow::BorrowMut, path::Iter, str, sync::Mutex};
+use std::collections::VecDeque;
 
 use crate::common::*;
 
 #[derive(Clone,Debug,PartialEq)]
 pub struct NEM12<'a> {
     header: record::Header<'a>,
-    nmi_data_details: Vec<NMIDetails<'a>>
+    nmi_data_details: Vec<record::NMIDataDetails<'a>>
 }
 
-#[derive(Clone,Debug,PartialEq)]
-pub struct NMIDetails<'a> {
-    rec: record::NMIDataDetails<'a>,
-    data: Vec<Data<'a>>
+fn parse_nmi_data_details<'a>(input:Input<'a>) -> IResult<Input,NMIDataDetails> {
+    let (input, mut nmi_details) = terminated(NMIDataDetails::parse,rec_separator)(input)?;
+    let interval_data_len = 1440 / nmi_details.interval_length;
+    let (input_pre_b2b,interval_data) = opt(separated_list(rec_separator, parse_interval_data(interval_data_len)))(input)?;
+    let (input,_) = rec_separator(input_pre_b2b)?;
+
+    nmi_details.interval_data_vec = interval_data;
+
+    if let (input,Some(b2b_details)) = opt(separated_list(rec_separator, B2BDetails::parse))(input)? {
+        nmi_details.b2b_details = Some(b2b_details);
+        Ok((input,nmi_details))
+    } else {
+        Ok((input_pre_b2b,nmi_details))
+    }
+    
 }
 
-#[derive(Clone,Debug,PartialEq)]
-pub struct Data<'a> {
-    rec: record::IntervalData<'a>,
-    events: Vec<record::IntervalEvent<'a>>,
-    b2b_details: Vec<record::B2BDetails<'a>>,
-}
+fn parse_interval_data<'a>(capacity: usize) -> impl FnMut(Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
+    move |input: Input<'a>| {
+        let (input, mut interval_data) = IntervalData::parse(capacity,input)?;
+        let (input, _) = rec_separator(input)?;
+        let (input, interval_events) = opt(separated_list(rec_separator, IntervalEvent::parse))(input)?;
+        interval_data.interval_events = interval_events;
 
-pub fn get_data_for_interval(input: Input) -> IResult<Input,Data> {
-    let (input,rec) = record::IntervalData::parse(input)?;
-    let (input_a,_) = rec_separator(input)?;
-    let (input_b,events): (Input,Vec<record::IntervalEvent>) = separated_list(rec_separator,record::IntervalEvent::parse)(input_a)?;
-    let input = if events.is_empty() { input } else { input_b };
-    let (input_a,_) = rec_separator(input)?;
-    let (input_b,b2b_details): (Input,Vec<record::B2BDetails>) = separated_list(rec_separator,record::B2BDetails::parse)(input_a)?;
-    let input = if b2b_details.is_empty() { input } else { input_b };
-
-    Ok((input, Data { rec, events, b2b_details }))
-}
-
-pub fn get_nmi_data_details(input: Input) -> IResult<Input,NMIDetails> {
-    let (input,rec) = record::NMIDataDetails::parse(input)?;
-    let (input,_) = rec_separator(input)?;
-    let (input,data): (Input,Vec<Data>) = separated_list(rec_separator,get_data_for_interval)(input)?;
-
-    Ok((input, NMIDetails { rec, data }))
+        Ok((input,interval_data))
+    }
 }
 
 impl <'a>NEM12<'a> {
-    fn from_str(input: Input<'a>) -> Result<NEM12<'a>,nom::Err<(&str,error::ErrorKind)>> {
-        let (input,header) = record::Header::parse(input)?;
-        let (input_a,_) = rec_separator(input)?;
-        let (input_b,nmi_data_details): (Input,Vec<NMIDetails>) = separated_list(rec_separator,get_nmi_data_details)(input_a)?;
-        let input = if nmi_data_details.is_empty() { input } else { input_b };
+    fn from_str(input: Input<'a>) -> Result<NEM12<'a>,usize> {
+        let strict = true;
+        let mut header: Option<Header> = None;
 
-        let (input,_) = rec_separator(input)?;
-        let (input,_) = record::EndOfData::parse(input)?;
-        let (_,_) = all_consuming(opt(rec_separator))(input)?;
+        let (input,nmi_data_details) = separated_list(rec_separator, parse_nmi_data_details)(input).map_err(|e| 0usize)?;
 
+        let header = header.ok_or(1usize)?;
         Ok(NEM12 {
             header,
             nmi_data_details
@@ -75,56 +60,69 @@ impl <'a>NEM12<'a> {
 
 struct Parser<'a> {
     src: Input<'a>,
-    iter: std::iter::Enumerate<str::Lines<'a>>,
+    iter: std::iter::Peekable<std::iter::Enumerate<str::Lines<'a>>>,
     data: Option<NEM12<'a>>,
-    finished: bool
+    finished: bool,
+    ctx: Mutex<(usize,)>,
+    // ctx: (usize,),
 }
 
 impl <'a>Parser<'a> {
 
-    fn new(src: Input<'a>) -> Result<Self,&str> {
+    fn new(src: Input<'a>) -> Self {
         let parser = Parser {
             src,
-            iter: src.lines().enumerate(),
+            iter: src.lines().enumerate().peekable(),
             data: None,
-            finished: false
+            finished: false,
+            ctx:Mutex::new((0,)),
+            // ctx:(0,),
         };
 
-        Ok(parser)
+        parser
     }
 
-    fn parse_line(&mut self) -> Result<Option<record::Kind>,(&str,usize,&str)> {
+    fn parse_line(&mut self) -> Result<Option<record::Kind>,(&'static str,usize,Err<Error<Input<'a>>>)> {
         if let Some((line_no,line)) = self.iter.next() {
             // println!("PARSING {}: '{}'",line_no,line);
             let res = alt((
-                map(record::Header::parse, |o| record::Kind::Header(o)),
-                map(record::NMIDataDetails::parse, |o| record::Kind::NMIDataDetails(o)),
-                map(record::IntervalData::parse, |o| record::Kind::IntervalData(o)),
-                map(record::IntervalEvent::parse, |o| record::Kind::IntervalEvent(o)),
-                map(record::B2BDetails::parse, |o| record::Kind::B2BDetails(o)),
-                map(record::EndOfData::parse, |o| record::Kind::EndOfData(o)),
+                map(record::Header::parse, |o| Some(record::Kind::Header(o))),
+                map(record::NMIDataDetails::parse, |o| {
+                    let mut mutex = self.ctx.lock().unwrap();
+                    mutex.0 = 1440usize / o.interval_length;
+                    Some(record::Kind::NMIDataDetails(o))
+                }),
+                map(|input|record::IntervalData::parse(self.ctx.lock().unwrap().0,input),
+                    |o| { Some(record::Kind::IntervalData(o)) }),
+                map(record::IntervalEvent::parse, |o| Some(record::Kind::IntervalEvent(o))),
+                map(record::B2BDetails::parse, |o| Some(record::Kind::B2BDetails(o))),
+                map(record::EndOfData::parse, |o| Some(record::Kind::EndOfData(o))),
             ))(line)
                 .map_err(|err| {
                     match err {
-                        nom::Err::Error((sentinel,_)) => ("Error parsing line: ",line_no+1,sentinel),
-                        nom::Err::Failure((sentinel,_)) => ("Failed to parse line: ",line_no+1,sentinel),
-                        nom::Err::Incomplete(needed) => match needed {
-                            nom::Needed::Size(sz) => ("Failed to parse line: ",sz,"Needed::Size"),
-                            nom::Needed::Unknown => ("Failed to parse line: ",line_no+1,"Needed::Unknown")
+                        Err::Error(sentinel) => ("Error parsing line: ",line_no+1,Err::Error(sentinel)),
+                        Err::Failure(sentinel) => ("Failed to parse line: ",line_no+1,Err::Failure(sentinel)),
+                        Err::Incomplete(needed) => match needed {
+                            Needed::Size(sz) => ("Failed to parse line: ",sz.into(),err),
+                            Needed::Unknown => ("Failed to parse line: ",line_no+1,err)
                         }
                     }
-                })?;
+                });
+            match res {
+                Ok(r) => Ok(r.1),
+                Err(e) => Err(e),
+            }
 
-            return Ok(Some(res.1));
+            // return Ok(Some(res.1));
         } else {
             match !self.finished {
                 true => {
                     self.finished = true;
-                    return Ok(None);
+                    Ok(None)
                 }
-                false => return Err(("Error: parser consumed all input",0,"lines"))
+                false => Err(("Error: parser consumed all input",0,nom::Err::Incomplete(Needed::Unknown)))
             }
-        };
+        }
     }
 }
 
@@ -133,6 +131,8 @@ pub mod file {
 
     #[cfg(test)]
     mod tests {
+        use nom::sequence::terminated;
+
         use super::*;
 
         const MULTIPLE_METERS_STR: &'static str = "100,NEM12,200402070911,MDA1,Ret1\n\
@@ -172,7 +172,11 @@ pub mod file {
 
         #[test]
         fn get_nmi_data_details_parser() {
-            let (input,_) = get_nmi_data_details(DATADETAILS_ROWS_STR).unwrap();
+            let (input,nmi_data_details) = record::NMIDataDetails::parse(DATADETAILS_ROWS_STR).unwrap();
+            
+            let capacity = 1440 / nmi_data_details.interval_length;
+            let (input,_) = preceded(rec_separator,|i|{record::IntervalData::parse(capacity, i)})(input).unwrap();
+            let (input,_) = preceded(rec_separator,|i|{record::IntervalData::parse(capacity, i)})(input).unwrap();
             assert_eq!(input,"\n")
         }
 
@@ -189,7 +193,7 @@ pub mod file {
         #[test]
         fn multiple_meters() {
 
-            let mut parser = Parser::new(MULTIPLE_METERS_STR).unwrap();
+            let mut parser = Parser::new(MULTIPLE_METERS_STR);
 
             for _ in 1..20 {
                 parser.parse_line().unwrap();
@@ -197,17 +201,25 @@ pub mod file {
 
             assert_eq!(parser.parse_line(),Ok(Some(record::Kind::EndOfData(record::EndOfData{}))));
             assert_eq!(parser.parse_line(),Ok(None));
-            assert_eq!(parser.parse_line(),Err(("Error: parser consumed all input",0,"lines")));
+            assert_eq!(parser.parse_line(),Err(("Error: parser consumed all input",0,nom::Err::Incomplete(Needed::Unknown))));
         }
 
         #[test]
         fn nem12_from_str() {
-            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR).unwrap();
+            let _nem12_obj = NEM12::from_str(MULTIPLE_METERS_STR);
+            if let Err(e) = _nem12_obj {
+                println!("{:?}",e);
+            }
+            _nem12_obj.unwrap();
         }
     }
 }
 
 pub mod record {
+    use std::option;
+
+    use nom::multi::many_m_n;
+
     use super::*;
 
     #[derive(Clone,Debug,PartialEq)]
@@ -223,14 +235,16 @@ pub mod record {
     // Header record (100)
     #[derive(Clone,Debug,PartialEq)]
     pub struct Header<'a> {
+        format: Input<'a>,
         created: NaiveDateTime,
         from_participant: Input<'a>,
         to_participant: Input<'a>,
     }
 
     impl <'a>Header<'a> {
-        pub fn new(created: NaiveDateTime, from_participant: Input<'a>, to_participant: Input<'a>) -> Self {
+        pub fn new(format:Input<'a>, created: NaiveDateTime, from_participant: Input<'a>, to_participant: Input<'a>) -> Self {
             Header {
+                format,
                 created,
                 from_participant,
                 to_participant
@@ -238,26 +252,24 @@ pub mod record {
         }
 
         pub fn parse(input: Input) -> IResult<Input,Header> {
-            header(input)
+            let (input, _) = tag("100,")(input)?;
+            let (input, format) = alt((tag("NEM12"),tag("NEM13")))(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, created) = datetime_12(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, from_participant) = section_of_max_length(alphanumeric1,10)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, to_participant) = section_of_max_length(alphanumeric1,10)(input)?;
+    
+            let header = Header::new(
+                format,
+                created,
+                from_participant,
+                to_participant
+            );
+    
+            Ok((input,header))
         }
-    }
-
-    fn header(input: Input) -> IResult<Input,Header> {
-        let (input, _) = tag("100,")(input)?;
-        let (input, _) = tag("NEM12,")(input)?;
-        let (input, created) = datetime_12(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, from_participant) = section_of_max_length(alphanumeric1,10)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, to_participant) = section_of_max_length(alphanumeric1,10)(input)?;
-
-        let header = Header::new(
-            created,
-            from_participant,
-            to_participant
-        );
-
-        Ok((input,header))
     }
 
     // NMI data details record (200)
@@ -272,59 +284,65 @@ pub mod record {
         pub uom: Input<'a>,
         pub interval_length: usize,
         pub next_scheduled_read_date: Option<NaiveDate>,
+        pub interval_data_vec: Option<Vec<IntervalData<'a>>>,
+        pub b2b_details: Option<Vec<B2BDetails<'a>>>,
     }
 
     impl <'a>NMIDataDetails<'a> {
         pub fn parse(input: Input) -> IResult<Input,NMIDataDetails> {
-            nmi_data_details(input)
-        }
-    }
-
-    fn nmi_data_details(input: Input) -> IResult<Input,NMIDataDetails> {
-        let (input, _) = tag("200,")(input)?;
-        let (input, nmi) = section_of_exact_length(alphanumeric1, 10)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, nmi_configuration) = section_of_max_length(alphanumeric1, 240)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, register_id) = section_of_max_length(alphanumeric1, 10)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, nmi_suffix) = section_of_exact_length(alphanumeric1, 2)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, mdm_data_stream_id) = optional_field(section_of_exact_length(alphanumeric1, 2),",")(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, meter_serial_number) = section_of_max_length(alphanumeric1, 12)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, uom) = section_of_max_length(alphanumeric1, 5)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, interval_length) = section_of_exact_length(digit1, 2)(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, next_scheduled_read_date) = match date_8(input){
-            Ok(d) => Ok((d.0,Some(d.1))),
-            Err(nom::Err::Error(_)) => {
-                match peek(alt((eof,tag("\n"))))(input) { // TODO: Add alt(eof,tag) to optional_field
-                    Ok((input,_)) => Ok((input,None)),
-                    Err(nom::Err::Error(e)) => {
-                        return Err(nom::Err::Error(e))
+            let (input, _) = tag("200,")(input)?;
+            let (input, nmi) = section_of_exact_length(alphanumeric1, 10)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, nmi_configuration) = section_of_max_length(alphanumeric1, 240)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, register_id) = section_of_max_length(alphanumeric1, 10)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, nmi_suffix) = section_of_exact_length(alphanumeric1, 2)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, mdm_data_stream_id) = optional_field(section_of_exact_length(alphanumeric1, 2),",")(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, meter_serial_number) = section_of_max_length(alphanumeric1, 12)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, uom) = section_of_max_length(alphanumeric1, 5)(input)?;
+            let (input, _) = tag(",")(input)?;
+            let (input, interval_length) = section_of_exact_length(digit1, 2)(input).map(|(input,val)| (input,val.parse::<usize>().unwrap()))?;
+            let (input, _) = tag(",")(input)?;
+            let (input, next_scheduled_read_date) = match date_8(input){
+                Ok(d) => Ok((d.0,Some(d.1))),
+                Err(nom::Err::Error(_)) => {
+                    match peek(alt((eof,tag("\n"))))(input) { // TODO: Add alt(eof,tag) to optional_field
+                        Ok((input,_)) => Ok((input,None)),
+                        Err(nom::Err::Error(e)) => {
+                            return Err(nom::Err::Error(e))
+                        }
+                        x => { println!("'{:?}'", x); panic!("This should never happen") }
                     }
-                    x => { println!("'{:?}'", x); panic!("This should never happen") }
-                }
-            },
-            x => { println!("{:?}", x); panic!("This should never happen") }
-        }?;
-
-        let nmi_data_details  = NMIDataDetails {
-            nmi,
-            nmi_configuration,
-            register_id,
-            nmi_suffix,
-            mdm_data_stream_id,
-            meter_serial_number,
-            uom,
-            interval_length: usize::from_str_radix(interval_length,10).unwrap(),
-            next_scheduled_read_date,
-        };
-
-        Ok((input,nmi_data_details))
+                },
+                x => { println!("{:?}", x); panic!("This should never happen") }
+            }?;
+    
+            // let interval_data_length = 1440usize / interval_length;
+            // let (input, interval_data_vec) = separated_list0(
+            //     rec_separator, 
+            //     |input| record::IntervalData::parse(interval_data_length, input)
+            // )(input)?;
+    
+            let nmi_data_details  = NMIDataDetails {
+                nmi,
+                nmi_configuration,
+                register_id,
+                nmi_suffix,
+                mdm_data_stream_id,
+                meter_serial_number,
+                uom,
+                interval_length,
+                next_scheduled_read_date,
+                interval_data_vec: None,
+                b2b_details: None,
+            };
+    
+            Ok((input,nmi_data_details))
+            }
     }
 
     // Interval data record (300)
@@ -337,19 +355,19 @@ pub mod record {
         pub reason_description: Option<Input<'a>>,
         pub update_datetime: NaiveDateTime,
         pub msats_load_datetime: Option<NaiveDateTime>,
+        pub interval_events: Option<Vec<IntervalEvent<'a>>>
     }
 
     impl <'a>IntervalData<'a> {
-        pub fn parse(input: Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
-            interval_data(input)
+        pub fn parse(capacity: usize, input: Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
+            interval_data(capacity, input)
         }
     }
 
-    fn interval_data<'a>(input: Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
+    fn interval_data<'a>(capacity: usize, input: Input<'a>) -> IResult<Input<'a>,IntervalData<'a>> {
         let (input, _) = tag("300,")(input)?;
         let (input, interval_date) = date_8(input)?;
-        let (input, _) = tag(",")(input)?;
-        let (input, interval_value) = separated_list(tag(","),double)(input)?;
+        let (input, interval_value) = many_m_n(capacity,capacity,preceded(tag(","),double))(input)?;
 
         // if let Some(details) = nmi_data_details_rec {
         //     if (1440 / details.interval_length) != interval_value.len() {
@@ -370,6 +388,10 @@ pub mod record {
         let (input, _) = tag(",")(input)?;
         let (input, msats_load_datetime) = opt(datetime_14)(input)?;
 
+        // // Get Event Codes (400 recs)
+        // let (input,_) = rec_separator(input)?;
+        // let (input,interval_events): (Input,Vec<record::IntervalEvent>) = separated_list0(rec_separator,record::IntervalEvent::parse)(input)?;
+
         let interval_data = IntervalData {
             interval_date,
             interval_value,
@@ -377,7 +399,8 @@ pub mod record {
             reason_code,
             reason_description,
             update_datetime,
-            msats_load_datetime
+            msats_load_datetime,
+            interval_events: None
         };
 
         Ok((input,interval_data))
@@ -484,6 +507,7 @@ pub mod record {
         fn header_100() {
             let date = NaiveDate::from_ymd(2004,5,1).and_hms(11, 35, 0);
             let header = record::Header::new (
+                "NEM12",
                 date.clone(),
                 "MDA1",
                 "Ret1"
@@ -499,6 +523,7 @@ pub mod record {
             assert_eq!(res,("\n",header));
     
             let header = record::Header::new (
+                "NEM12",
                 date.clone(),
                 "0123456789",
                 "Ret1"
@@ -517,7 +542,7 @@ pub mod record {
     
             let res: (Input, error::ErrorKind) = match record::Header::parse(raw) {
                 Ok(o) => { println!("{:?}",o); panic!("Failed") },
-                Err(nom::Err::Error(e)) => { e },
+                Err(nom::Err::Error(e)) => { (e.input,error::ErrorKind::Verify) }, //NOTE: must accomodate custom errors somehow
                 Err(nom::Err::Incomplete(_)) |
                 Err(nom::Err::Failure(_)) => panic!("This should never happen")
             };
@@ -537,6 +562,8 @@ pub mod record {
                 uom: "KWH",
                 interval_length: 30usize,
                 next_scheduled_read_date: None,
+                interval_data_vec: None,
+                b2b_details: None,
             };
     
             let raw = "200,VABD000163,E1Q1,1,E1,N1,METSER123,KWH,30,\n";
@@ -568,16 +595,17 @@ pub mod record {
                 reason_description: None,
                 update_datetime: NaiveDate::from_ymd(2004, 2, 2).and_hms(12, 0, 25),
                 msats_load_datetime: Some(NaiveDate::from_ymd(2004, 2, 2).and_hms(14, 25, 16)),
+                interval_events: None,
             };
     
-            let raw = "300,20040201,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,A,,,20040202120025,20040202142516\n";
+            let raw = "300,20040201,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,1.111,A,,,20040202120025,20040202142516";
     
-            let res = match record::IntervalData::parse(raw) {
+            let res = match record::IntervalData::parse(48, raw) {
                 Ok(o) => o,
                 Err(e) => { println!("{:?}",e); panic!("Failed") }
             };
     
-            assert_eq!(res,("\n",interval_data));
+            assert_eq!(res,("",interval_data));
         }
     
         #[test]
